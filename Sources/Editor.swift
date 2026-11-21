@@ -42,6 +42,7 @@ final class Editor: ObservableObject {
     @Published private(set) var previewSuspended = false
     @Published private(set) var markIn: Double?
     @Published private(set) var markOut: Double?
+    @Published private(set) var markedTrack: Int?
     @Published private(set) var busy = false
     @Published private(set) var isExporting = false
     @Published private(set) var progress: Double = 0
@@ -114,8 +115,15 @@ final class Editor: ObservableObject {
         return trial
     }
     var canRemoveRange: Bool {
-        guard let markIn, let markOut else { return false }
-        return markOut > markIn + 0.000001
+        guard let markIn, let markOut, markOut > markIn + 0.000001 else { return false }
+        var start = 0.0
+        for clip in segments {
+            let end = start + (clip.end - clip.start)
+            if clip.track == markedTrack, min(end, markOut) - max(start, markIn) > 0.000001 { return true }
+            if end >= markOut { break }
+            start = end
+        }
+        return false
     }
     var hasUnsavedChanges: Bool {
         segments != savedSegments || ((projectURL != nil || !segments.isEmpty) &&
@@ -150,6 +158,8 @@ final class Editor: ObservableObject {
 
     func importFiles(_ urls: [URL]) {
         guard !busy, !urls.isEmpty else { return }
+        let lastTrack = segments.compactMap(\.track).max() ?? 0
+        guard lastTrack <= Int.max - urls.count else { errorMessage = "轨道编号超出范围。"; return }
         pause()
         busy = true
         errorMessage = nil
@@ -162,7 +172,8 @@ final class Editor: ObservableObject {
                 status = "正在读取素材 \(index + 1) / \(urls.count)"
                 do {
                     let source = try await inspectSource(url)
-                    imported.append(Segment(source: source, start: 0, end: source.duration))
+                    imported.append(Segment(source: source, start: 0, end: source.duration,
+                                            track: lastTrack + imported.count + 1))
                 } catch {
                     failures.append("\(url.lastPathComponent)：\(error.localizedDescription)")
                 }
@@ -172,7 +183,7 @@ final class Editor: ObservableObject {
                 let cursor = duration
                 record()
                 segments.append(contentsOf: imported)
-                applyEdit(at: cursor, selection: first.id, message: "已导入 \(imported.count) 个视频")
+                applyEdit(at: cursor, selection: first.id, message: "已将 \(imported.count) 个视频导入各自轨道")
             } else { status = "导入未完成" }
             if !failures.isEmpty { errorMessage = failures.joined(separator: "\n\n") }
         }
@@ -213,13 +224,18 @@ final class Editor: ObservableObject {
     }
 
     func select(_ id: UUID, at offset: Double = 0) {
-        guard !busy, let position = position(of: id) else { return }
+        guard !busy, let clip = segments.first(where: { $0.id == id }), let position = position(of: id) else { return }
+        if markedTrack != clip.track { clearMarks() }
         pause()
-        seek(position + offset)
+        seek(position + min(clip.end - clip.start, max(0, offset)), selecting: id)
     }
 
     func seek(_ seconds: Double) {
-        guard let time = movePlayhead(to: seconds) else { return }
+        seek(seconds, selecting: nil)
+    }
+
+    private func seek(_ seconds: Double, selecting id: UUID?) {
+        guard let time = movePlayhead(to: seconds, selecting: id) else { return }
         lastScrubSeek = -Double.infinity
         resumePreviewIfNeeded()
         seekPlayer(to: time)
@@ -256,25 +272,48 @@ final class Editor: ObservableObject {
         seek((round(playhead * fps) + Double(direction)) / fps)
     }
 
-    func setIn() {
+    func jumpToEdit(_ direction: Int) {
         guard !busy, !segments.isEmpty else { return }
+        var previous = 0.0
+        var boundary = 0.0
+        for clip in segments {
+            boundary += clip.end - clip.start
+            if boundary > playhead + 0.000001 { break }
+            if boundary < playhead - 0.000001 {
+                previous = boundary
+            }
+        }
+        pause()
+        seek(direction > 0 ? boundary : previous)
+    }
+
+    func setIn() {
+        guard !busy, let selected else { return }
         pause()
         markIn = snapped(playhead)
+        if markOut == nil || markedTrack != selected.track {
+            markOut = nil
+            markedTrack = selected.track
+        }
         if let out = markOut, let input = markIn, out <= input { markOut = nil }
         status = "已设入点"
     }
 
     func setOut() {
-        guard !busy, !segments.isEmpty else { return }
+        guard !busy, let selected else { return }
         pause()
+        if markIn == nil { markedTrack = selected.track }
         markOut = snapped(playhead)
-        if let input = markIn, let out = markOut, input >= out { markIn = nil }
+        if let input = markIn, let out = markOut, input >= out {
+            markIn = nil
+            markedTrack = selected.track
+        }
         status = "已设出点"
     }
 
     func removeRange() {
         guard !busy, canRemoveRange, let a = markIn, let b = markOut else { return }
-        erase(a..<b, message: "已删除选区")
+        erase(a..<b, onTrack: markedTrack, message: "已删除本轨选区")
     }
 
     func trimBefore() {
@@ -283,7 +322,7 @@ final class Editor: ObservableObject {
         guard cut > first + 0.000001, cut < first + clip.end - clip.start - 0.000001 else {
             status = "请先把播放头移到片段内部"; return
         }
-        erase(first..<cut, message: "已裁去片头")
+        erase(first..<cut, onTrack: clip.track, message: "已裁去片头")
     }
 
     func trimAfter() {
@@ -292,28 +331,49 @@ final class Editor: ObservableObject {
         guard cut > first + 0.000001, cut < end - 0.000001 else {
             status = "请先把播放头移到片段内部"; return
         }
-        erase(cut..<end, message: "已裁去片尾")
+        erase(cut..<end, onTrack: clip.track, message: "已裁去片尾")
     }
 
     func split() {
-        guard !busy, let i = index(at: playhead) else { return }
-        let clip = segments[i], begin = position(of: segments[i].id) ?? 0
-        let cursor = snapped(playhead)
-        let cut = clip.start + cursor - begin
-        guard cut > clip.start + 0.000001, cut < clip.end - 0.000001 else {
-            status = "请先把播放头移到片段内部"; return
+        guard let selectedID else { return }
+        split(selectedID, atClipOffset: nil)
+    }
+
+    func split(_ id: UUID, atClipOffset offset: Double?) {
+        guard !busy, let i = segments.firstIndex(where: { $0.id == id }),
+              let begin = position(of: id) else { return }
+        let clip = segments[i]
+        let cutOffset = if let offset {
+            razorCutOffset(in: clip, at: offset)
+        } else {
+            interiorOffset(snapped(playhead) - begin, in: clip)
         }
+        guard let cutOffset else {
+            status = offset == nil ? "请先把播放头移到片段内部" : "请点击片段内部"
+            return
+        }
+        let cut = clip.start + cutOffset
         record()
-        let right = Segment(source: clip.source, start: cut, end: clip.end)
-        segments.replaceSubrange(i...i, with: [
-            Segment(id: clip.id, source: clip.source, start: clip.start, end: cut), right
-        ])
-        applyEdit(at: cursor, selection: right.id, message: "已在播放头处分割")
+        var left = clip
+        left.end = cut
+        let right = Segment(source: clip.source, start: cut, end: clip.end, track: clip.track)
+        segments.replaceSubrange(i...i, with: [left, right])
+        applyEdit(at: begin + cutOffset, selection: right.id,
+                  message: offset == nil ? "已在播放头处分割" : "已用剃刀分割")
+    }
+
+    func razorCutOffset(in clip: Segment, at offset: Double) -> Double? {
+        guard !busy, offset.isFinite else { return nil }
+        return interiorOffset(snappedOffset(offset, in: clip), in: clip)
+    }
+
+    private func interiorOffset(_ offset: Double, in clip: Segment) -> Double? {
+        offset > 0.000001 && offset < clip.end - clip.start - 0.000001 ? offset : nil
     }
 
     func deleteSelected() {
         guard !busy, let segment = selected, let first = position(of: segment.id) else { return }
-        erase(first..<(first + segment.end - segment.start), message: "已删除片段")
+        erase(first..<(first + segment.end - segment.start), onTrack: segment.track, message: "已删除片段")
     }
 
     func moveSelected(_ offset: Int) {
@@ -483,6 +543,7 @@ final class Editor: ObservableObject {
         var id: UUID
         var start: Double
         var end: Double
+        var track: Int?
     }
     private struct Project: Codable {
         var version: Int
@@ -515,8 +576,9 @@ final class Editor: ObservableObject {
         guard !segments.contains(where: { Self.sameFile($0.source.url, url) }) else {
             errorMessage = "请选择与素材不同的工程文件名。"; return false
         }
-        let project = Project(version: 1, clips: segments.map {
-            ProjectClip(path: $0.source.url.path, id: $0.id, start: $0.start, end: $0.end)
+        let version = segments.contains(where: { $0.track != nil }) ? 2 : 1
+        let project = Project(version: version, clips: segments.map {
+            ProjectClip(path: $0.source.url.path, id: $0.id, start: $0.start, end: $0.end, track: $0.track)
         }, codec: codec.rawValue, size: size.rawValue, bitrate: bitrateMbps)
         do {
             try JSONEncoder().encode(project).write(to: url, options: .atomic)
@@ -560,7 +622,7 @@ final class Editor: ObservableObject {
             defer { busy = false; importTask = nil }
             do {
                 let project = try JSONDecoder().decode(Project.self, from: Data(contentsOf: url))
-                guard project.version == 1, Set(project.clips.map(\.id)).count == project.clips.count,
+                guard [1, 2].contains(project.version), Set(project.clips.map(\.id)).count == project.clips.count,
                       let storedCodec = ExportCodec(rawValue: project.codec),
                       let storedSize = ExportSize(rawValue: project.size),
                       project.bitrate.isFinite, project.bitrate > 0 else {
@@ -588,7 +650,10 @@ final class Editor: ObservableObject {
                     }
                     guard saved.start >= 0, saved.end > saved.start, saved.end <= resource.duration + 0.001,
                           saved.end.isFinite, saved.start.isFinite else { throw CocoaError(.fileReadCorruptFile) }
-                    clips.append(Segment(id: saved.id, source: resource, start: saved.start, end: min(saved.end, resource.duration)))
+                    let track = project.version == 2 ? saved.track : nil
+                    guard track.map({ $0 > 0 }) ?? true else { throw CocoaError(.fileReadCorruptFile) }
+                    clips.append(Segment(id: saved.id, source: resource, start: saved.start,
+                                         end: min(saved.end, resource.duration), track: track))
                 }
                 try Task.checkCancellation()
                 history.removeAll(); future.removeAll()
@@ -629,13 +694,12 @@ final class Editor: ObservableObject {
     }
 
     @discardableResult
-    private func movePlayhead(to seconds: Double) -> Double? {
+    private func movePlayhead(to seconds: Double, selecting id: UUID? = nil) -> Double? {
         guard seconds.isFinite else { return nil }
         let time = min(duration, max(0, seconds))
         if playhead != time { playheadPosition.seconds = time }
-        if let target = index(at: time), selectedID != segments[target].id {
-            selectedID = segments[target].id
-        }
+        let selection = id ?? index(at: time).map { segments[$0].id }
+        if selectedID != selection { selectedID = selection }
         return time
     }
 
@@ -680,14 +744,17 @@ final class Editor: ObservableObject {
 
     private func snapped(_ time: Double) -> Double {
         guard let i = index(at: time), let begin = position(of: segments[i].id) else { return 0 }
-        let clip = segments[i]
+        return begin + snappedOffset(time - begin, in: segments[i])
+    }
+
+    private func snappedOffset(_ offset: Double, in clip: Segment) -> Double {
         let length = clip.end - clip.start
-        if abs(time - begin) < 0.000001 { return begin }
-        if abs(time - begin - length) < 0.000001 { return begin + length }
+        if offset <= 0.000001 { return 0 }
+        if offset >= length - 0.000001 { return length }
         let rate = max(1, clip.source.fps)
-        let sourceTime = (max(0, time - begin) + clip.start) * rate
+        let sourceTime = (offset + clip.start) * rate
         let rounded = min(clip.end, max(clip.start, sourceTime.rounded() / rate))
-        return begin + rounded - clip.start
+        return rounded - clip.start
     }
 
     private func slice(_ range: Range<Double>) -> [Segment] {
@@ -698,25 +765,47 @@ final class Editor: ObservableObject {
             let lower = max(range.lowerBound, cursor)
             let upper = min(range.upperBound, end)
             if upper - lower > 0.000001 {
-                result.append(Segment(id: clip.id, source: clip.source,
-                                      start: max(clip.start, clip.start + (lower - cursor)),
-                                      end: min(clip.end, clip.start + (upper - cursor))))
+                var portion = clip
+                portion.start = max(clip.start, clip.start + (lower - cursor))
+                portion.end = min(clip.end, clip.start + (upper - cursor))
+                result.append(portion)
             }
             cursor = end
         }
         return result
     }
 
-    private func erase(_ range: Range<Double>, message: String) {
-        let before = slice(0..<range.lowerBound)
-        let after = slice(range.upperBound..<max(range.upperBound, duration))
-        let ids = Set(before.map(\.id))
-        let retained = before + after.map { clip in
-            ids.contains(clip.id) ? Segment(source: clip.source, start: clip.start, end: clip.end) : clip
+    private func erase(_ range: Range<Double>, onTrack track: Int?, message: String) {
+        var retained: [Segment] = []
+        var cursor = 0.0
+        var firstCut: Double?
+        for clip in segments {
+            let start = cursor
+            cursor += clip.end - clip.start
+            let lower = max(start, range.lowerBound)
+            let upper = min(cursor, range.upperBound)
+            guard clip.track == track, upper - lower > 0.000001 else {
+                retained.append(clip)
+                continue
+            }
+            if firstCut == nil { firstCut = lower }
+            let keepsHead = lower - start > 0.000001
+            if keepsHead {
+                var head = clip
+                head.end = clip.start + (lower - start)
+                retained.append(head)
+            }
+            if cursor - upper > 0.000001 {
+                var tail = clip
+                if keepsHead { tail.id = UUID() }
+                tail.start = clip.start + (upper - start)
+                retained.append(tail)
+            }
         }
+        guard let firstCut else { return }
         record()
         segments = retained
-        applyEdit(at: range.lowerBound, selection: nil, message: message)
+        applyEdit(at: firstCut, selection: nil, message: message)
     }
 
     private struct Snapshot {
@@ -725,10 +814,12 @@ final class Editor: ObservableObject {
         let playhead: Double
         let markIn: Double?
         let markOut: Double?
+        let markedTrack: Int?
     }
 
     private func snapshot() -> Snapshot {
-        Snapshot(segments: segments, selection: selectedID, playhead: playhead, markIn: markIn, markOut: markOut)
+        Snapshot(segments: segments, selection: selectedID, playhead: playhead,
+                 markIn: markIn, markOut: markOut, markedTrack: markedTrack)
     }
 
     private func markSaved() {
@@ -749,6 +840,11 @@ final class Editor: ObservableObject {
         canUndo = !history.isEmpty; canRedo = !future.isEmpty
         applyEdit(at: state.playhead, selection: state.selection, message: message)
         markIn = state.markIn; markOut = state.markOut
+        markedTrack = state.markedTrack
+    }
+
+    private func clearMarks() {
+        markIn = nil; markOut = nil; markedTrack = nil
     }
 
     private func applyEdit(at cursor: Double, selection: UUID?, message: String) {
@@ -757,7 +853,7 @@ final class Editor: ObservableObject {
         measuredTrial = nil
         playheadPosition.seconds = min(duration, max(0, cursor))
         selectedID = selection ?? index(at: playhead).map { segments[$0].id }
-        markIn = nil; markOut = nil
+        clearMarks()
         status = message
         rebuildPreview()
     }

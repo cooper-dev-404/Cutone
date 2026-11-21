@@ -20,12 +20,14 @@ struct Segment: Identifiable, Codable, Hashable, Sendable {
     var source: SourceInfo
     var start: Double
     var end: Double
+    let track: Int?
 
-    init(id: UUID = UUID(), source: SourceInfo, start: Double, end: Double) {
+    init(id: UUID = UUID(), source: SourceInfo, start: Double, end: Double, track: Int? = nil) {
         self.id = id
         self.source = source
         self.start = start
         self.end = end
+        self.track = track
     }
 }
 

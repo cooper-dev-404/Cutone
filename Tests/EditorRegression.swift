@@ -333,6 +333,10 @@ private final class CompatibilityEvents: @unchecked Sendable {
         editor.importFiles(sources)
         try await settled(editor)
         try check(editor.segments.count == 2 && close(editor.duration, 14), "mixed source import 8+6 s \(editor.errorMessage ?? "")")
+        try check(editor.segments.map(\.track) == [1, 2], "batch import puts each source on its own track")
+        editor.select(editor.segments[1].id)
+        try check(close(editor.playhead, 8), "second track starts at the first source's end")
+        editor.seek(0)
         editor.togglePlayback()
         let playbackDeadline = Date().addingTimeInterval(9)
         while editor.playhead < 0.15, Date() < playbackDeadline {
@@ -364,7 +368,32 @@ private final class CompatibilityEvents: @unchecked Sendable {
             && editor.segments[0].id != editor.segments[1].id, "delete middle, ripple & distinct identities")
         editor.seek(2.5); editor.split()
         try check(editor.segments.count == 4 && close(editor.segments[1].end, 5.5) && close(editor.segments[2].start, 5.5), "split at cursor")
+        try check(editor.segments.map(\.track) == [1, 1, 1, 2], "split and range deletion keep the source track")
         let originalOrder = editor.segments
+        let originalSelection = editor.selectedID
+        let originalPlayhead = editor.playhead
+        let razorTarget = originalOrder.last!
+        let rate = razorTarget.source.fps
+        let cutTime = (razorTarget.start * rate + 30.2).rounded() / rate
+        let indicatedOffset = editor.razorCutOffset(in: razorTarget, at: 30.2 / rate)
+        try check(indicatedOffset.map { close(razorTarget.start + $0, cutTime) } == true
+            && editor.razorCutOffset(in: razorTarget, at: 0) == nil
+            && editor.razorCutOffset(in: razorTarget, at: razorTarget.end - razorTarget.start) == nil
+            && editor.segments == originalOrder && close(editor.playhead, originalPlayhead),
+                  "razor guide indicates the actual cut frame without changing the timeline")
+        editor.split(razorTarget.id, atClipOffset: 0)
+        try check(editor.segments == originalOrder && editor.selectedID == originalSelection
+            && close(editor.playhead, originalPlayhead), "razor on a boundary leaves the current edit intact")
+        editor.split(razorTarget.id, atClipOffset: 30.2 / rate)
+        try check(editor.segments.count == originalOrder.count + 1
+            && Array(editor.segments.dropLast(2)) == Array(originalOrder.dropLast())
+            && close(editor.segments[originalOrder.count - 1].end, cutTime)
+            && close(editor.segments.last!.start, cutTime)
+            && editor.segments.last!.track == razorTarget.track
+            && close(editor.duration, 9.5), "razor splits the clicked clip at its nearest frame")
+        editor.undo()
+        try check(editor.segments == originalOrder && editor.selectedID == originalSelection
+            && close(editor.playhead, originalPlayhead), "undo razor restores the previous clip and playhead")
         let target = editor.segments.last!.id
         editor.move(target, before: editor.segments[0].id)
         let reordered = editor.segments
@@ -382,7 +411,26 @@ private final class CompatibilityEvents: @unchecked Sendable {
         try await settled(loaded)
         try check(loaded.segments == reordered && loaded.codec == .h264 && loaded.size == .hd
             && loaded.bitrateMbps == 8 && !loaded.hasUnsavedChanges, "project round trip \(loaded.errorMessage ?? "")")
-        var invalid = try JSONSerialization.jsonObject(with: Data(contentsOf: project)) as! [String:Any]
+        let savedProject = try JSONSerialization.jsonObject(with: Data(contentsOf: project)) as! [String:Any]
+        var legacyProject = savedProject
+        legacyProject["version"] = 1
+        var legacyClips = legacyProject["clips"] as! [[String:Any]]
+        for index in legacyClips.indices { legacyClips[index].removeValue(forKey: "track") }
+        legacyProject["clips"] = legacyClips
+        let legacyURL = output.appendingPathComponent("legacy.qingjian")
+        try JSONSerialization.data(withJSONObject: legacyProject).write(to: legacyURL)
+        let legacy = Editor()
+        legacy.loadProject(from: legacyURL)
+        try await settled(legacy)
+        try check(legacy.segments.map(\.id) == reordered.map(\.id) && legacy.segments.allSatisfy { $0.track == nil },
+                  "version 1 projects open on their original single track")
+        legacy.seek(5); legacy.setIn(); legacy.seek(7); legacy.setOut(); legacy.removeRange()
+        try check(close(legacy.duration, 7.5) && close(legacy.segments[0].end, 5)
+            && close(legacy.segments[1].start, 2), "legacy track can delete across two sources")
+        legacy.seek(0); legacy.setIn(); legacy.seek(legacy.duration); legacy.setOut(); legacy.removeRange()
+        try check(legacy.segments.isEmpty && !legacy.canRemoveRange && legacy.selectedID == nil, "remove full legacy track")
+
+        var invalid = savedProject
         var clips = invalid["clips"] as! [[String:Any]]
         clips[0]["path"] = output.appendingPathComponent("missing.mov").path
         invalid["clips"] = clips
@@ -397,16 +445,18 @@ private final class CompatibilityEvents: @unchecked Sendable {
         try check(!loaded.saveProject(to: sources[1]), "protect source from project save")
         loaded.clearError()
         loaded.seek(5); loaded.setIn(); loaded.seek(7); loaded.setOut(); loaded.removeRange()
-        try check(close(loaded.duration, 7.5) && close(loaded.segments[0].end, 5)
-            && close(loaded.segments[1].start, 2), "delete across two sources")
+        try check(close(loaded.duration, 8.5) && close(loaded.segments[0].end, 5)
+            && loaded.segments[1] == reordered[1], "range deletion ripples only content on the marked track")
         loaded.undo()
+        try check(loaded.canRemoveRange && loaded.markedTrack == 2, "undo restores the marked track and range")
         loaded.select(loaded.segments[0].id); loaded.moveSelected(1)
         try check(loaded.segments[1].id == target, "move one position")
         loaded.deleteSelected(); try check(loaded.segments.count == 3 && close(loaded.duration, 3.5), "delete selected segment")
         loaded.undo(); loaded.undo()
         loaded.seek(0); loaded.setIn(); loaded.seek(loaded.duration); loaded.setOut(); loaded.removeRange()
-        try check(loaded.segments.isEmpty && !loaded.canRemoveRange && loaded.selectedID == nil, "remove full range")
-        loaded.undo(); try check(loaded.segments == reordered, "undo restores removed timeline")
+        try check(loaded.segments == Array(reordered.dropFirst()) && !loaded.canRemoveRange && close(loaded.duration, 3.5),
+                  "remove a complete track without removing the other tracks")
+        loaded.undo(); try check(loaded.segments == reordered, "undo restores the removed track")
         let trialStart = loaded.duration - 1
         loaded.seek(trialStart)
         try await waitFor("preview to be ready at the trial start") {
@@ -481,6 +531,14 @@ private final class CompatibilityEvents: @unchecked Sendable {
         try await checkFrameGrid(secondPreview, fps: 30, frames: 18)
         try check(loaded.trialResult?.url == secondPreview && close(loaded.trialResult?.duration ?? 0, tail.duration),
                   "new trial statistics report the actual subsecond tail duration")
+        let fullMovie = output.appendingPathComponent("tracks.mp4")
+        loaded.size = .hd
+        loaded.startExport(to: fullMovie)
+        try await settled(loaded)
+        guard loaded.lastExport == fullMovie else { throw Failure("multitrack export: \(loaded.errorMessage ?? loaded.status)") }
+        let movie = try await MediaEngine.inspect(fullMovie)
+        try check(close(movie.duration, loaded.duration) && movie.width == 1920 && close(movie.fps, 30),
+                  "all tracks export as one movie in timeline order")
         print("DONE")
     }
 }
