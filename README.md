@@ -2,11 +2,10 @@
   <img src="docs/images/app-icon.png" alt="剪一刀的野兔图标" width="104" height="104">
 </p>
 
-<h1 align="center">剪一刀</h1>
+<h1 align="center">剪一刀 · Mac端青春版视频剪辑软件</h1>
 
 <p align="center">
-  <strong>Mac 上的本地视频快剪工具</strong><br>
-  裁掉片头片尾，删去中间一段，把几段视频拼成一个 MP4。
+  在 Mac 上剪辑本地视频。裁掉片头片尾，删去中间一段，把几段视频拼成一个 MP4。
 </p>
 
 <p align="center">
@@ -78,8 +77,8 @@
 需要 Apple 芯片 Mac、macOS 14 或更新版本，以及 Xcode 命令行工具。仓库随附 Apple 芯片版媒体工具，克隆后可在本机离线构建。
 
 ```bash
-git clone https://github.com/cooper-dev-404/jian-yi-dao.git
-cd jian-yi-dao
+git clone https://github.com/cooper-dev-404/Cutone.git
+cd Cutone
 bash build.sh
 open "build/剪一刀.app"
 ```
