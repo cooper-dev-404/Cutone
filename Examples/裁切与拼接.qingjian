@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "clips": [
+    {
+      "path": "../Tests/Fixtures/A-2160p30-AVC.mp4",
+      "id": "A82E2757-E536-4852-AD67-AC2FD2A36408",
+      "start": 1,
+      "end": 3
+    },
+    {
+      "path": "../Tests/Fixtures/A-2160p30-AVC.mp4",
+      "id": "C1326216-84C8-412D-820C-EB058B52D76D",
+      "start": 5,
+      "end": 7
+    },
+    {
+      "path": "../Tests/Fixtures/B-1440p60-HEVC.mov",
+      "id": "29F9A918-7DDC-4ECA-A8ED-19823125022E",
+      "start": 1,
+      "end": 4
+    }
+  ],
+  "codec": "HEVC",
+  "size": "跟随首段",
+  "bitrate": 20
+}

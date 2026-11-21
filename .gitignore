@@ -1,0 +1,23 @@
+.DS_Store
+/build/
+/Releases/
+*.app/
+*.dSYM/
+module-cache/
+
+# Editing projects and media stay local. These fixtures are synthetic.
+*.[qQ][iI][nN][gG][jJ][iI][aA][nN]
+!/Examples/裁切与拼接.qingjian
+*.[mM][kK][vV]
+*.[mM][pP]4
+*.[mM][oO][vV]
+*.[mM]4[vV]
+*.[wW][eE][bB][mM]
+*.[aA][vV][iI]
+*.[tT][sS]
+*.[mM]2[tT][sS]
+*.[mM][tT][sS]
+*.[mM][pP][gG]
+*.[mM][pP][eE][gG]
+*.[mM][xX][fF]
+!/Tests/Fixtures/*

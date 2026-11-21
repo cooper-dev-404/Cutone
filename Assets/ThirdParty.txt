@@ -1,0 +1,1 @@
+剪一刀的格式兼容工具使用 FFmpeg 8.1.3 的独立命令行程序 ffmpeg 和 ffprobe，采用 LGPL 2.1 或更新版本。完整许可证随附于 FFmpeg-LGPL.txt 及 FFmpeg-License.txt。FFmpeg 项目位于 https://ffmpeg.org/ 。项目中 ThirdParty 目录提供 FFmpeg 原始源码压缩包，Tools 目录提供精简构建脚本。
