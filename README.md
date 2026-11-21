@@ -2,7 +2,7 @@
   <img src="docs/images/app-icon.png" alt="剪一刀的野兔图标" width="104" height="104">
 </p>
 
-<h1 align="center">剪一刀 · Mac端青春版视频剪辑软件</h1>
+<h1 align="center">剪一刀 · Mac端青春版Premiere Pro</h1>
 
 <p align="center">
   在 Mac 上剪辑本地视频。裁掉片头片尾，删去中间一段，把几段视频拼成一个 MP4。
